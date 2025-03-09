@@ -1,1 +1,73 @@
+# tính xác suất p(f2|f1)
+
+import pandas as pd
+import numpy as np
+from vnstock import Vnstock
+from talib import MACD, SMA
+
+# Lấy dữ liệu từ vnstock
+def get_stock_data(symbol, start_date, end_date):
+    vnstock_instance = Vnstock()
+    df = vnstock_instance.stock(symbol=stock, source='VCI').quote.history(start=start_date, end=end_date)
+    df['date'] = pd.to_datetime(df['time'])
+    df.set_index('date', inplace=True)
+    return df
+
+# Tính toán MACD và Signal Line
+def calculate_macd(df):
+    short_window = 12
+    long_window = 26
+    signal_window = 9
+    df['EMA_12'] = df['close'].ewm(span=short_window, adjust=False).mean()
+    df['EMA_26'] = df['close'].ewm(span=long_window, adjust=False).mean()
+    df['MACD'] = df['EMA_12'] - df['EMA_26']
+    df['Signal_Line'] = df['MACD'].ewm(span=signal_window, adjust=False).mean()
+    return df
+
+# Xác định Feature 1: MACD cắt lên Signal Line
+def identify_feature_1(df):
+    df['Feature_1'] = (df['MACD'].shift(1) <= df['Signal_Line'].shift(1)) & (df['MACD'] > df['Signal_Line'])
+    return df
+
+# Xác định Feature 2: Khối lượng lớn hơn SMA 20
+def identify_feature_2(df):
+    df["sma_20"] = SMA(df['close'], timeperiod=20)
+    df["volume_99"] = df["volume"].rolling(window=20).quantile(0.99)
+    df['Feature_2'] = (df['volume'] > df['volume_99'])
+    return df
+
+# Tính xác suất tăng giá sau d ngày khi Feature 2 xuất hiện sau Feature 1 từ 1 -> 4 ngày
+def calculate_probabilities(df, d=5):
+    probabilities = []
+    for delay in range(1, 5):  # Feature 2 xuất hiện sau 1 -> 4 ngày
+        df[f'Feature_2_after_{delay}'] = df['Feature_2'].shift(-delay)
+        valid_cases = df[df['Feature_1'] & df[f'Feature_2_after_{delay}']]
+        if not valid_cases.empty:
+            success_cases = (valid_cases['close'].shift(-d) > valid_cases['close']).sum()
+            total_cases = len(valid_cases)
+            probabilities.append((delay, success_cases / total_cases if total_cases > 0 else 0))
+    return probabilities
+
+# Danh sách cổ phiếu
+stocks = ["CTG", "VIB", "ACB", "BID", "EIB", "HDB", "MBB", "OCB", "SHB", "STB", "TPB", "VBB", "VPB","VN30F1M"]
+train_end_date = "2024-12-31"
+test_start_date = "2025-01-01"
+end_date = dt.datetime.now().strftime('%Y-%m-%d')
+start_date = (dt.datetime.now() - dt.timedelta(days=5000)).strftime('%Y-%m-%d')
+
+# Chạy pipeline cho từng cổ phiếu
+results = {}
+for stock in stocks:
+    df = get_stock_data(stock, start_date, train_end_date)  # Giới hạn đến train_end_date
+    df = calculate_macd(df)
+    df = identify_feature_1(df)
+    df = identify_feature_2(df)
+    probabilities = calculate_probabilities(df, d=5)
+    results[stock] = probabilities
+
+# Hiển thị kết quả
+for stock, probabilities in results.items():
+    print(f"\nKết quả cho cổ phiếu {stock}:")
+    for delay, prob in probabilities:
+        print(f"Feature 2 xuất hiện sau {delay} ngày -> Xác suất tăng giá sau 5 ngày: {prob:.2%}")
 

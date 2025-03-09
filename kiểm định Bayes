@@ -1,0 +1,143 @@
+import vnstock
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import datetime as dt
+from talib import MACD, SMA, ADX, CCI
+from vnstock import Vnstock
+
+# Danh sách cổ phiếu cần lấy dữ liệu
+stocks = ["CTG", "VIB", "ACB", "BID", "EIB", "HDB", "MBB", "OCB", "SHB", "STB", "TPB", "VBB", "VPB","VN30F1M"]
+
+# Thời gian bắt đầu và kết thúc
+train_end_date = "2024-12-31"
+test_start_date = "2025-01-01"
+end_date = dt.datetime.now().strftime('%Y-%m-%d')
+start_date = (dt.datetime.now() - dt.timedelta(days=5000)).strftime('%Y-%m-%d')
+
+# Lấy dữ liệu từ vnstock
+vnstock_instance = Vnstock()
+results = {}
+
+for stock in stocks:
+    try:
+        # Lấy dữ liệu lịch sử
+        df = vnstock_instance.stock(symbol=stock, source='VCI').quote.history(start=start_date, end=end_date)
+        df['time'] = pd.to_datetime(df['time'])
+        
+        # Tính các chỉ báo kỹ thuật
+        df["sma_10"] = SMA(df['close'], timeperiod=10)
+        df["sma_20"] = SMA(df['close'], timeperiod=20)
+        df["sma_50"] = SMA(df['close'], timeperiod=50)
+        df["sma_200"] = SMA(df['close'], timeperiod=200)
+        macd, signal, _ = MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+        df["macd"] = macd
+        df["signal"] = signal
+
+        # Tính ADX và CCI
+        df['adx'] = ADX(df['high'], df['low'], df['close'], timeperiod=14)
+        df['cci'] = CCI(df['high'], df['low'], df['close'], timeperiod=14)
+
+        # Tính RSI
+        delta = df['close'].diff()
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).rolling(window=14).mean()
+        avg_loss = pd.Series(loss).rolling(window=14).mean()
+        rs = avg_gain / avg_loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        df["volume_99"] = df["volume"].rolling(window=20).quantile(0.99)
+
+        # Đánh dấu tín hiệu mua
+        df["buy_signal"] = ((df["macd"] <= -0.2) & (df["rsi"] <= 30) & (df["volume"] > df["volume_99"])).astype(int)
+        df["buy_signal_1"] = (df["volume"] > df["volume_99"]).astype(int)
+        df["buy_signal_2"] =  ((df["macd"] <= -0.2) & (df["rsi"] <= 30)).astype(int)
+        df["buy_signal_3"] = ((df['macd'].shift(1) <= df['signal'].shift(1)) & (df['macd'] > df['signal'])).astype(int)
+        
+        
+        # Tính giá thay đổi sau 5 ngày
+        df["price_after_5"] = df["close"].shift(-5)
+        df["price_change"] = (df["price_after_5"] - df["close"]) / df["close"]
+        
+        # Đánh dấu các tín hiệu tăng giá > 5%
+        df["price_up"] = (df["price_change"] > 0.05).astype(int)
+        
+        # Chia tập train và test
+        train_data = df[df['time'] < test_start_date]
+        
+        # Xác định tín hiệu trong tập train
+        buy_signals = train_data[train_data['buy_signal'] == 1]
+        buy_signals_1 = train_data[train_data['buy_signal_1'] == 1]
+        buy_signals_2 = train_data[train_data['buy_signal_2'] == 1]
+        buy_signals_3 = train_data[train_data['buy_signal_3'] == 1]
+        buy_signals_up = buy_signals[buy_signals['price_up'] == 1]
+        buy_signals_up_1 = buy_signals_1[buy_signals_1['price_up'] == 1]
+        buy_signals_up_2 = buy_signals_2[buy_signals_2['price_up'] == 1]
+        buy_signals_up_3 = buy_signals_3[buy_signals_3['price_up'] == 1]
+        # Tính xác suất tăng giá, tránh lỗi chia cho 0
+        up_percentage = (len(buy_signals_up) / len(buy_signals) * 100) if len(buy_signals) > 0 else 0
+        up_percentage_1 = (len(buy_signals_up_1) / len(buy_signals_1) * 100) if len(buy_signals_1) > 0 else 0
+        up_percentage_2 = (len(buy_signals_up_2) / len(buy_signals_2) * 100) if len(buy_signals_2) > 0 else 0
+        up_percentage_3 = (len(buy_signals_up_3) / len(buy_signals_3) * 100) if len(buy_signals_3) > 0 else 0
+
+        # Lưu kết quả
+        results[stock] = {
+            "buy_signal": up_percentage,
+            "buy_signal_1": up_percentage_1,
+            "buy_signal_2": up_percentage_2,
+            "buy_signal_3": up_percentage_3
+        }
+
+    except Exception as e:
+        print(f"Lỗi khi lấy dữ liệu cho {stock}: {e}")
+
+# 🟢 **Tạo bảng tổng hợp**
+summary_df = pd.DataFrame(columns=["Stock", "buy_signal","buy_signal_3", "buy_signal_1", "buy_signal_2", "1 * 2", "Comparison"])
+
+for stock in stocks:
+    if stock in results:  # Đảm bảo dữ liệu hợp lệ
+        buy_signal = results[stock]["buy_signal"]
+        buy_signal_1 = results[stock]["buy_signal_1"]
+        buy_signal_2 = results[stock]["buy_signal_2"]
+        buy_signal_3 = results[stock]["buy_signal_3"]
+
+        # Tính tích xác suất
+        buy_signal_product = (buy_signal_1 * buy_signal_2) / 100  # Chia 100 để chuẩn hóa xác suất
+
+        # So sánh với buy_signal
+        if buy_signal_product < buy_signal:
+            comparison = "Dương"
+        elif buy_signal_product > buy_signal:
+            comparison = "Âm"
+        else:
+            comparison = "Độc lập"
+
+        summary_df = pd.concat([summary_df, pd.DataFrame({
+            "Stock": [stock],
+            "buy_signal": [buy_signal],
+            "buy_signal_3": [buy_signal_1],
+            "buy_signal_1": [buy_signal_1],
+            "buy_signal_2": [buy_signal_2],
+            "1 * 2": [buy_signal_product],
+            "Comparison": [comparison]
+        })], ignore_index=True)
+
+# 🟢 **Định dạng bảng**
+summary_df.set_index("Stock", inplace=True)
+summary_df["buy_signal"] = summary_df["buy_signal"].map(lambda x: f"{x:.2f}%")
+summary_df["buy_signal_3"] = summary_df["buy_signal_3"].map(lambda x: f"{x:.2f}%")
+summary_df["buy_signal_1"] = summary_df["buy_signal_1"].map(lambda x: f"{x:.2f}%")
+summary_df["buy_signal_2"] = summary_df["buy_signal_2"].map(lambda x: f"{x:.2f}%")
+summary_df["1 * 2"] = summary_df[ "1 * 2"].map(lambda x: f"{x:.2f}%")
+
+# 🟢 **In bảng tổng hợp**
+print("\n📊 Tổng hợp xác suất tăng giá theo tín hiệu mua:")
+print(summary_df)
+
+# Nếu muốn in bảng đẹp hơn
+try:
+    from tabulate import tabulate
+    print(tabulate(summary_df, headers='keys', tablefmt='grid'))
+except ImportError:
+    pass  # Nếu chưa cài `tabulate`, sẽ chỉ in DataFrame bình thường.
+
